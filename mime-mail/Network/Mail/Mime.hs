@@ -13,7 +13,9 @@ module Network.Mail.Mime
     , renderMail'
       -- * Sending messages
     , sendmail
+    , sendmailCustom
     , renderSendMail
+    , renderSendMailCustom
       -- * High-level 'Mail' creation
     , simpleMail
       -- * Utilities
@@ -32,7 +34,7 @@ import System.Process
 import System.IO
 import System.Exit
 import System.FilePath (takeFileName)
-import qualified Codec.Binary.Base64 as Base64
+import qualified Data.ByteString.Base64 as Base64
 import Control.Monad ((<=<), forM)
 import Data.List (intersperse)
 import qualified Data.Text.Lazy as LT
@@ -250,11 +252,25 @@ renderMail' m = do
     setStdGen g'
     return lbs
 
--- | Send a fully-formed email message via the sendmail executable.
+-- | Send a fully-formed email message via the default sendmail
+-- executable with default options.
 sendmail :: L.ByteString -> IO ()
-sendmail lbs = do
-    (Just hin, _, _, phandle) <- createProcess $ (proc
-        "/usr/sbin/sendmail" ["-t"]) { std_in = CreatePipe }
+sendmail = sendmailCustom "/usr/sbin/sendmail" ["-t"]
+
+-- | Render an email message and send via the default sendmail
+-- executable with default options.
+renderSendMail :: Mail -> IO ()
+renderSendMail = sendmail <=< renderMail'
+
+-- | Send a fully-formed email message via the specified sendmail
+-- executable with specified options.
+sendmailCustom :: FilePath        -- ^ sendmail executable path
+                  -> [String]     -- ^ sendmail command-line options
+                  -> L.ByteString -- ^ mail message as lazy bytestring
+                  -> IO ()
+sendmailCustom sm opts lbs = do
+    (Just hin, _, _, phandle) <- createProcess $ 
+                                 (proc sm opts) { std_in = CreatePipe }
     L.hPut hin lbs
     hClose hin
     exitCode <- waitForProcess phandle
@@ -262,9 +278,13 @@ sendmail lbs = do
         ExitSuccess -> return ()
         _ -> error $ "sendmail exited with error code " ++ show exitCode
 
--- | Render an email message and send via 'sendmail'.
-renderSendMail :: Mail -> IO ()
-renderSendMail = sendmail <=< renderMail'
+-- | Render an email message and send via the specified sendmail
+-- executable with specified options.
+renderSendMailCustom :: FilePath    -- ^ sendmail executable path
+                        -> [String] -- ^ sendmail command-line options
+                        -> Mail     -- ^ mail to render and send
+                        -> IO ()
+renderSendMailCustom sm opts = sendmailCustom sm opts <=< renderMail'
 
 -- FIXME usage of FilePath below can lead to issues with filename encoding
 
@@ -374,20 +394,15 @@ encodedWord t = mconcat
     go'' w = fromWord8 61 `mappend` hex (w `shiftR` 4)
                           `mappend` hex (w .&. 15)
 
--- Encode data into base64. Base64.encode cannot be used here
--- because it suffers from stack overflow when used with large input.
+-- 57 bytes, when base64-encoded, becomes 76 characters.
+-- Perform the encoding 57-bytes at a time, and then append a newline.
 base64 :: L.ByteString -> Builder
-base64 =
-    fromChar8String . addLines . go Base64.encodeInc . groupN 10 . L.unpack
+base64 lbs
+    | L.null lbs = mempty
+    | otherwise = fromByteString x64 `mappend`
+                  fromByteString "\r\n" `mappend`
+                  base64 y
   where
-    go encoder [] = case encoder Base64.EDone of
-        Base64.EFinal str -> str
-    go encoder (chunk:rest) = case encoder $ Base64.EChunk chunk of
-        Base64.EPart str next -> str ++ go next rest
-    fromChar8String = fromWriteList writeWord8 . map (toEnum . fromEnum)
-    groupN n = map (take n) . takeWhile (not . null) . iterate (drop n)
-    addLines [] = []
-    addLines s =
-        a ++ '\r' : '\n' : addLines b
-      where
-        (a, b) = splitAt 76 s
+    (x', y) = L.splitAt 57 lbs
+    x = S.concat $ L.toChunks x'
+    x64 = Base64.encode x
