@@ -394,4 +394,3 @@ base64 :: L.ByteString -> Builder
 base64 ls = fromByteString $ joinWith "\r\n" 76 $ encode bs
     where
 	bs = S.concat $ L.toChunks ls
-
